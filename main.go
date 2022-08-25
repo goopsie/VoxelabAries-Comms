@@ -7,48 +7,73 @@ import (
 	"hash/crc32"
 	"net"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
+
+	"github.com/schollz/progressbar/v3"
 )
 
 const gcodepath = "C:/Users/Goopsie/Voxelab-Comms/3DBenchy.gcode"
+const printerip = "192.168.0.116:8899"
 
 func main() {
-	conn, err := net.Dial("tcp", "192.168.0.116:8899")
+	fmt.Printf("Connecting to \"%s\"...\n", printerip)
+	conn, err := net.Dial("tcp", printerip)
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
-	connbuf := bufio.NewReader(conn)
-	conn.Write([]byte("~M601 S1\n")) // Authenticate???
-	str, _ := connbuf.ReadString('\n')
-	if !strings.Contains(str, "M601 Received.") {
-		str, _ = connbuf.ReadString('\n')
-	} else if !strings.Contains(str, "Control Success.") {
-		str, _ = connbuf.ReadString('\n')
-	} else if !strings.Contains(str, "ok") {
-		str, _ = connbuf.ReadString('\n')
-	} else {
-		fmt.Println(str)
-	}
-	//amongus := make(chan string, 100)
+	fmt.Println("Connected!")
+	prntOut := make(chan string, 100)
 	cwrite := make(chan []byte, 100)
 	m := sync.Mutex{}
-	//go reader(conn, amongus)
+	go reader(conn, prntOut)
 	go writer(conn, &m, cwrite)
-	go dostuff(connbuf, cwrite)
-	time.Sleep(time.Second * 100)
+
+	cwrite <- []byte("~M601 S1\n") // Authenticate???
+	str := <-prntOut
+	if !strings.Contains(str, "Control Success.") {
+		conn.Close()
+		os.Exit(1)
+	}
+	time.Sleep(time.Second)
+	go writeFile(prntOut, cwrite)
+
+	ch := make(chan os.Signal, 1)
+
+	signal.Notify(ch, os.Interrupt, os.Kill, syscall.SIGTERM)
+	<-ch
+	conn.Close()
 }
 
-func dostuff(connbuf *bufio.Reader, cwrite chan []byte) {
+func writeFile(prntOut chan string, cwrite chan []byte) {
 	file, err := os.ReadFile(gcodepath)
 	if err != nil {
-		panic("sus among us")
+		panic(err)
 	}
 	data := getchunks(file)
-	cwrite <- []byte(fmt.Sprintf("~M28 %d 0:/user/3DPoopchy.gcode\n", len(file)))
-	time.Sleep(200 * time.Millisecond)
+	cwrite <- []byte(fmt.Sprintf("~M28 %d 0:/user/largefile.gcode\n", len(file)))
+	str := <-prntOut
+	if !strings.Contains(str, "Writing to file") {
+		panic(str)
+	}
+	bar := progressbar.NewOptions(len(file),
+		progressbar.OptionEnableColorCodes(true),
+		progressbar.OptionShowBytes(true),
+		progressbar.OptionSetWidth(15),
+		progressbar.OptionSetPredictTime(true),
+		progressbar.OptionShowCount(),
+		progressbar.OptionSetDescription("Sending data to printer..."),
+		progressbar.OptionSetTheme(progressbar.Theme{
+			Saucer:        "[green]=[reset]",
+			SaucerHead:    "[green]>[reset]",
+			SaucerPadding: " ",
+			BarStart:      "[",
+			BarEnd:        "]",
+		}))
 	for i := 0; i < len(data); i++ {
 		chunk := data[i]
 		fc := getcrc(chunk)
@@ -69,28 +94,19 @@ func dostuff(connbuf *bufio.Reader, cwrite chan []byte) {
 		header := []byte{0x5A, 0x5A, 0xA5, 0xA5, sn[3], sn[2], sn[1], sn[0], fl[3], fl[2], fl[1], fl[0], fc[3], fc[2], fc[1], fc[0]}
 		sending := append(header, chunk[:]...)
 		cwrite <- sending
-		fmt.Println("sending it!!")
-		str, _ := connbuf.ReadString('\n')
-		fmt.Println(str)
+		str := <-prntOut
 		if !strings.Contains(str, fmt.Sprintf("%d ok.", i)) {
-			if strings.Contains(str, "error.") {
-				break
-			}
-			for {
-				str, _ := connbuf.ReadString('\n')
-				fmt.Println(str)
-				fmt.Println("Checking if contains")
-				if strings.Contains(str, fmt.Sprintf("%d ok.", i)) || strings.Contains(str, "error.") {
-					break
-				}
-			}
+			panic("balls")
 		}
-		fmt.Println(str)
+		bar.Add(4096)
 	}
-	time.Sleep(200 * time.Millisecond)
-	cwrite <- []byte("~M29")
-	fmt.Println("File should be saved")
 
+	cwrite <- []byte("~M29")
+	str = <-prntOut
+	if !strings.Contains(str, "Done saving file") {
+		panic("balls")
+	}
+	fmt.Println("File saved.")
 }
 
 func getchunks(data []byte) [][]byte {
@@ -135,16 +151,22 @@ func writer(conn net.Conn, m *sync.Mutex, cwrite chan []byte) {
 	}
 }
 
-//func reader(conn net.Conn, amongus chan string) {
-//	connbuf := bufio.NewReader(conn)
-//	for {
-//		str, err := connbuf.ReadString('\n')
-//		if err != nil {
-//			break
-//		}
-//
-//		if len(str) > 0 {
-//			amongus <- str
-//		}
-//	}
-//}
+func reader(conn net.Conn, prntOut chan string) {
+	connbuf := bufio.NewReader(conn)
+	for {
+		resp := ""
+		for {
+			conn.SetReadDeadline(time.Now().Add(2 * time.Millisecond))
+			respTemp, err := connbuf.ReadString('\n')
+			if err != nil {
+
+				break
+			}
+			resp = resp + respTemp
+		}
+		if len(resp) > 0 {
+			//fmt.Printf("Recieved message from printer, Sending\n----------\n%s\n----------\nthrough prntOut\n", string(resp))
+			prntOut <- string(resp)
+		}
+	}
+}
