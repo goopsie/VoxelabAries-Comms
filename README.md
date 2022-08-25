@@ -1,2 +1,3 @@
 # VoxelabAries-Comms
-don't look at this i spent a day and was mostly trying to figure out how on earth everything worked
+i think i'm the first person to do this :D
+don't look at my code unless you don't have your glasses on and are 50 feet away
