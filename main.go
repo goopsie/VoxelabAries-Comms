@@ -12,10 +12,10 @@ import (
 	"time"
 )
 
-const gcodepath = "C:/Users/Goopsie/Voxelab-Comms/amongus.gcode"
+const gcodepath = "C:/Users/Goopsie/Voxelab-Comms/3DBenchy.gcode"
 
 func main() {
-	conn, err := net.Dial("tcp", "192.168.0.101:8899")
+	conn, err := net.Dial("tcp", "192.168.0.116:8899")
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
@@ -38,19 +38,7 @@ func main() {
 	//go reader(conn, amongus)
 	go writer(conn, &m, cwrite)
 	go dostuff(connbuf, cwrite)
-	//timeout := time.After(time.Second)
-	time.Sleep(time.Second * 20)
-	//for {
-	//	select {
-	//	case <-timeout:
-	//		m.Lock()
-	//		conn.Write([]byte("~M105"))
-	//		m.Unlock()
-	//		timeout = time.After(time.Second)
-	//	case sus := <-amongus:
-	//		fmt.Println(sus)
-	//	}
-	//}
+	time.Sleep(time.Second * 100)
 }
 
 func dostuff(connbuf *bufio.Reader, cwrite chan []byte) {
@@ -59,11 +47,13 @@ func dostuff(connbuf *bufio.Reader, cwrite chan []byte) {
 		panic("sus among us")
 	}
 	data := getchunks(file)
-	cwrite <- []byte(fmt.Sprintf("~M28 %d 0:/user/benchty.gcode\n", len(file)))
+	cwrite <- []byte(fmt.Sprintf("~M28 %d 0:/user/3DPoopchy.gcode\n", len(file)))
 	time.Sleep(200 * time.Millisecond)
 	for i := 0; i < len(data); i++ {
 		chunk := data[i]
 		fc := getcrc(chunk)
+		fl := make([]byte, 4)
+		binary.LittleEndian.PutUint32(fl, uint32(len(chunk)))
 		if len(chunk) < 4096 {
 			for {
 				if len(chunk) == 4096 {
@@ -72,9 +62,6 @@ func dostuff(connbuf *bufio.Reader, cwrite chan []byte) {
 				chunk = append(chunk, 0x00)
 			}
 		}
-
-		fl := make([]byte, 4)
-		binary.LittleEndian.PutUint32(fl, uint32(len(file)))
 
 		sn := make([]byte, 4)
 		binary.LittleEndian.PutUint32(sn, uint32(i))
@@ -92,7 +79,8 @@ func dostuff(connbuf *bufio.Reader, cwrite chan []byte) {
 			for {
 				str, _ := connbuf.ReadString('\n')
 				fmt.Println(str)
-				if strings.Contains(str, fmt.Sprintf("%d ok.", i)) {
+				fmt.Println("Checking if contains")
+				if strings.Contains(str, fmt.Sprintf("%d ok.", i)) || strings.Contains(str, "error.") {
 					break
 				}
 			}
