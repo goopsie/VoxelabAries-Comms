@@ -16,8 +16,9 @@ import (
 	"github.com/schollz/progressbar/v3"
 )
 
-const gcodepath = "C:/Users/Goopsie/Voxelab-Comms/3DBenchy.gcode"
-const printerip = "192.168.0.116:8899"
+const gcodepath = "C:/Users/Goopsie/go/src/voxelab-comms/prismo_v4.gcode"
+const printerip = "192.168.0.104:8899"
+const packetlength = 4096 // only works with 4096
 
 func main() {
 	fmt.Printf("Connecting to \"%s\"...\n", printerip)
@@ -39,12 +40,11 @@ func main() {
 		conn.Close()
 		os.Exit(1)
 	}
-	time.Sleep(time.Second)
 	go writeFile(prntOut, cwrite)
 
 	ch := make(chan os.Signal, 1)
 
-	signal.Notify(ch, os.Interrupt, os.Kill, syscall.SIGTERM)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
 	<-ch
 	conn.Close()
 }
@@ -54,8 +54,8 @@ func writeFile(prntOut chan string, cwrite chan []byte) {
 	if err != nil {
 		panic(err)
 	}
-	data := getchunks(file)
-	cwrite <- []byte(fmt.Sprintf("~M28 %d 0:/user/largefile.gcode\n", len(file)))
+	data := getchunks(file, packetlength)
+	cwrite <- []byte(fmt.Sprintf("~M28 %d 0:/user/prismo_v4.gcode\n", len(file)))
 	str := <-prntOut
 	if !strings.Contains(str, "Writing to file") {
 		panic(str)
@@ -77,11 +77,11 @@ func writeFile(prntOut chan string, cwrite chan []byte) {
 	for i := 0; i < len(data); i++ {
 		chunk := data[i]
 		fc := getcrc(chunk)
-		fl := make([]byte, 4)
-		binary.LittleEndian.PutUint32(fl, uint32(len(chunk)))
-		if len(chunk) < 4096 {
+		sl := make([]byte, 4)
+		binary.LittleEndian.PutUint32(sl, uint32(len(chunk)))
+		if len(chunk) < packetlength {
 			for {
-				if len(chunk) == 4096 {
+				if len(chunk) == packetlength {
 					break
 				}
 				chunk = append(chunk, 0x00)
@@ -91,14 +91,15 @@ func writeFile(prntOut chan string, cwrite chan []byte) {
 		sn := make([]byte, 4)
 		binary.LittleEndian.PutUint32(sn, uint32(i))
 
-		header := []byte{0x5A, 0x5A, 0xA5, 0xA5, sn[3], sn[2], sn[1], sn[0], fl[3], fl[2], fl[1], fl[0], fc[3], fc[2], fc[1], fc[0]}
+		header := []byte{0x5A, 0x5A, 0xA5, 0xA5, sn[3], sn[2], sn[1], sn[0], sl[3], sl[2], sl[1], sl[0], fc[3], fc[2], fc[1], fc[0]}
 		sending := append(header, chunk[:]...)
 		cwrite <- sending
 		str := <-prntOut
 		if !strings.Contains(str, fmt.Sprintf("%d ok.", i)) {
+			fmt.Println(str)
 			panic("balls")
 		}
-		bar.Add(4096)
+		bar.Add(packetlength)
 	}
 
 	cwrite <- []byte("~M29")
@@ -109,13 +110,13 @@ func writeFile(prntOut chan string, cwrite chan []byte) {
 	fmt.Println("File saved.")
 }
 
-func getchunks(data []byte) [][]byte {
+func getchunks(data []byte, clength int) [][]byte {
 	var sliceofslices [][]byte
 	var inc = 0
 	for i := 0; i < len(data); i++ {
 		fbytes := make([]byte, 0)      // One chunk of 4096 bytes
 		for j, n := range data[inc:] { //haha i feel very cool about this
-			if j >= 4096 {
+			if j >= clength {
 				break
 			}
 			fbytes = append(fbytes, n)
@@ -123,10 +124,10 @@ func getchunks(data []byte) [][]byte {
 
 		sliceofslices = append(sliceofslices, []byte{})
 		sliceofslices[i] = fbytes
-		if (inc + 4096) > len(data) {
+		if (inc + clength) > len(data) {
 			break
 		} else {
-			inc = inc + 4096
+			inc = inc + clength
 		}
 	}
 
@@ -151,21 +152,19 @@ func writer(conn net.Conn, m *sync.Mutex, cwrite chan []byte) {
 	}
 }
 
-func reader(conn net.Conn, prntOut chan string) {
+func reader(conn net.Conn, prntOut chan string) { // this does not feel like the right way
 	connbuf := bufio.NewReader(conn)
 	for {
 		resp := ""
 		for {
-			conn.SetReadDeadline(time.Now().Add(2 * time.Millisecond))
+			conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
 			respTemp, err := connbuf.ReadString('\n')
 			if err != nil {
-
 				break
 			}
 			resp = resp + respTemp
 		}
 		if len(resp) > 0 {
-			//fmt.Printf("Recieved message from printer, Sending\n----------\n%s\n----------\nthrough prntOut\n", string(resp))
 			prntOut <- string(resp)
 		}
 	}
