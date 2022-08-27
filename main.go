@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -15,34 +16,37 @@ import (
 	"github.com/schollz/progressbar/v3"
 )
 
-const gcodepath = "C:/Users/Goopsie/go/src/voxelab-comms/prismo_v4.gcode"
-const printerip = "192.168.0.104:8899"
 const packetlength = 4096 // only works with 4096
 
+var ch = make(chan os.Signal, 1)
+
 func main() {
-	fmt.Printf("Connecting to \"%s\"...\n", printerip)
-	conn, err := net.Dial("tcp", printerip)
+	if len(os.Args) < 2 {
+		fmt.Println("Usage: voxaries_sendfile {Filepath} {Printer IP}")
+		os.Exit(1)
+	}
+	fmt.Printf("Connecting to \"%s\"...\n", (os.Args[2] + ":8899"))
+	conn, err := net.Dial("tcp", (os.Args[2] + ":8899"))
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
-	fmt.Println("Connected!")
+	fmt.Println("Connected to printer!")
 	prntOut := make(chan string, 100)
 	cwrite := make(chan []byte, 100)
 	m := sync.Mutex{}
 	go reader(conn, prntOut)
 	go writer(conn, &m, cwrite)
 
+	fmt.Println("Establishing connection to printer...")
 	cwrite <- []byte("~M601 S1\n") // Authenticate???
 	str := <-prntOut
 	if !strings.Contains(str, "Control Success.") {
 		conn.Close()
 		os.Exit(1)
 	}
-	fmt.Println("Connection established.")
+	fmt.Println("Connection established!")
 	go writeFile(prntOut, cwrite)
-
-	ch := make(chan os.Signal, 1)
 
 	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
 	<-ch
@@ -50,15 +54,17 @@ func main() {
 }
 
 func writeFile(prntOut chan string, cwrite chan []byte) {
-	file, err := os.ReadFile(gcodepath)
+	file, err := os.ReadFile(os.Args[1])
 	if err != nil {
-		panic(err)
+		fmt.Println(err)
+		ch <- os.Interrupt
 	}
 	data := getchunks(file, packetlength)
-	cwrite <- []byte(fmt.Sprintf("~M28 %d 0:/user/prismo_v4.gcode\n", len(file)))
+	cwrite <- []byte(fmt.Sprintf("~M28 %d 0:/user/%s\n", len(file), filepath.Base(os.Args[1])))
 	str := <-prntOut
 	if !strings.Contains(str, "Writing to file") {
-		panic(str)
+		fmt.Println("Unexpected response from printer.")
+		ch <- os.Interrupt
 	}
 	bar := progressbar.NewOptions(len(file),
 		progressbar.OptionEnableColorCodes(true),
@@ -98,8 +104,17 @@ func writeFile(prntOut chan string, cwrite chan []byte) {
 		str := <-prntOut
 
 		if !strings.Contains(str, fmt.Sprintf("%d ok.", i)) {
-			fmt.Println(str)
-			panic("balls")
+			bar.Close()
+			switch {
+			case strings.Contains(str, "error"):
+				fmt.Println("There was an error sending data to the printer, this should rarely happen.")
+				fmt.Println("If this happens regularly, or with a specific .gcode file, please make a github issue.")
+				ch <- os.Interrupt
+			default:
+				fmt.Println("Unexpected response from printer after sending slice: ", str)
+				fmt.Println("If this happens, please make a github issue.")
+				ch <- os.Interrupt
+			}
 		}
 		bar.Add(packetlength)
 	}
@@ -107,9 +122,13 @@ func writeFile(prntOut chan string, cwrite chan []byte) {
 	cwrite <- []byte("~M29")
 	str = <-prntOut
 	if !strings.Contains(str, "Done saving file") {
-		panic("balls")
+		bar.Close()
+		fmt.Println("Unexpected response from printer after M29:", str)
+		fmt.Println("If this happens, please make a github issue.")
+		ch <- os.Interrupt
 	}
-	fmt.Println("File saved.")
+	fmt.Println("\nFile saved.")
+	ch <- os.Interrupt
 }
 
 func getchunks(data []byte, clength int) [][]byte {
