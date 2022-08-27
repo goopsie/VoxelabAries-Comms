@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/schollz/progressbar/v3"
 )
@@ -40,6 +39,7 @@ func main() {
 		conn.Close()
 		os.Exit(1)
 	}
+	fmt.Println("Connection established.")
 	go writeFile(prntOut, cwrite)
 
 	ch := make(chan os.Signal, 1)
@@ -93,8 +93,10 @@ func writeFile(prntOut chan string, cwrite chan []byte) {
 
 		header := []byte{0x5A, 0x5A, 0xA5, 0xA5, sn[3], sn[2], sn[1], sn[0], sl[3], sl[2], sl[1], sl[0], fc[3], fc[2], fc[1], fc[0]}
 		sending := append(header, chunk[:]...)
+
 		cwrite <- sending
 		str := <-prntOut
+
 		if !strings.Contains(str, fmt.Sprintf("%d ok.", i)) {
 			fmt.Println(str)
 			panic("balls")
@@ -152,17 +154,16 @@ func writer(conn net.Conn, m *sync.Mutex, cwrite chan []byte) {
 	}
 }
 
-func reader(conn net.Conn, prntOut chan string) { // this does not feel like the right way
+func reader(conn net.Conn, prntOut chan string) {
 	connbuf := bufio.NewReader(conn)
 	for {
 		resp := ""
 		for {
-			conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
-			respTemp, err := connbuf.ReadString('\n')
-			if err != nil {
+			respTemp, _ := connbuf.ReadString('\n')
+			resp = resp + respTemp
+			if strings.HasSuffix(resp, "ok.\r\n") || strings.HasSuffix(resp, "ok\r\n") {
 				break
 			}
-			resp = resp + respTemp
 		}
 		if len(resp) > 0 {
 			prntOut <- string(resp)
