@@ -9,24 +9,42 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/schollz/progressbar/v3"
 )
 
-const packetlength = 4096 // only works with 4096
-
 var ch = make(chan os.Signal, 1)
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("Usage: voxaries_sendfile {Filepath} {Printer IP}")
-		os.Exit(1)
+	ipAddr := ""
+	if len(os.Args) < 3 {
+		if len(os.Args) == 2 {
+			f, err := os.Open(os.Args[1])
+			if err != nil {
+				printUsage()
+				os.Exit(1)
+			}
+			f.Close()
+			ipAddr = discoverPrinter()
+			if ipAddr == "" {
+				fmt.Println("No printer found on the network.")
+				os.Exit(1)
+			}
+		} else {
+			printUsage()
+			os.Exit(1)
+		}
+	} else {
+		ipAddr = os.Args[2]
 	}
-	fmt.Printf("Connecting to \"%s\"...\n", (os.Args[2] + ":8899"))
-	conn, err := net.Dial("tcp", (os.Args[2] + ":8899"))
+
+	fmt.Printf("Connecting to \"%s\"...\n", (ipAddr + ":8899"))
+	conn, err := net.Dial("tcp", (ipAddr + ":8899"))
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
@@ -50,6 +68,9 @@ func main() {
 
 	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
 	<-ch
+
+	cwrite <- []byte("~M602\n")
+	fmt.Println("Disconnected from printer.")
 	conn.Close()
 }
 
@@ -59,7 +80,7 @@ func writeFile(prntOut chan string, cwrite chan []byte) {
 		fmt.Println(err)
 		ch <- os.Interrupt
 	}
-	data := getchunks(file, packetlength)
+	data := getchunks(file, 4096)
 	cwrite <- []byte(fmt.Sprintf("~M28 %d 0:/user/%s\n", len(file), filepath.Base(os.Args[1])))
 	str := <-prntOut
 	if !strings.Contains(str, "Writing to file") {
@@ -85,9 +106,9 @@ func writeFile(prntOut chan string, cwrite chan []byte) {
 		fc := getcrc(chunk)
 		sl := make([]byte, 4)
 		binary.LittleEndian.PutUint32(sl, uint32(len(chunk)))
-		if len(chunk) < packetlength {
+		if len(chunk) < 4096 {
 			for {
-				if len(chunk) == packetlength {
+				if len(chunk) == 4096 {
 					break
 				}
 				chunk = append(chunk, 0x00)
@@ -116,10 +137,11 @@ func writeFile(prntOut chan string, cwrite chan []byte) {
 				ch <- os.Interrupt
 			}
 		}
-		bar.Add(packetlength)
+		bar.Add(4096)
 	}
+	bar.Finish()
 
-	cwrite <- []byte("~M29")
+	cwrite <- []byte("~M29\n")
 	str = <-prntOut
 	if !strings.Contains(str, "Done saving file") {
 		bar.Close()
@@ -128,7 +150,133 @@ func writeFile(prntOut chan string, cwrite chan []byte) {
 		ch <- os.Interrupt
 	}
 	fmt.Println("\nFile saved.")
+
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Print("Would you like to start printing this file? Y/N: ")
+	text, _ := reader.ReadString('\n')
+	if strings.Contains(strings.ToLower(text), "y") {
+		cwrite <- []byte("~M23 0:/user/" + filepath.Base(os.Args[1]) + "\n")
+		str = <-prntOut
+		if !strings.Contains(str, "File opened") {
+			fmt.Println("Unexpected response from printer after M23:", str)
+			fmt.Println("If this happens, please make a github issue.")
+			ch <- os.Interrupt
+		}
+		fmt.Println("Printing...")
+	}
+
 	ch <- os.Interrupt
+}
+
+func discoverPrinter() string {
+	fmt.Println("Searching for printer on the network...")
+	type printer struct {
+		ip   string
+		name string
+	}
+
+	printers := make([]printer, 0)
+	timeout := 0
+
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		fmt.Println("Error dialing UDP:", err)
+		return ""
+	}
+
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+
+	preferredIp := localAddr.IP
+	conn.Close()
+
+	addr, err := net.ResolveUDPAddr("udp", preferredIp.String()+":18002")
+	if err != nil {
+		fmt.Println("Error resolving UDP address:", err)
+		return ""
+	}
+
+	udpConn, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		fmt.Println("Error listening on UDP:", err)
+		return ""
+	}
+
+	go func() {
+		for {
+			buf := make([]byte, 1024)
+			n, addr, err := udpConn.ReadFromUDP(buf)
+			if err != nil {
+				fmt.Println("Error reading UDP:", err)
+				return
+			}
+			if len(buf[:n]) > 128 {
+				newPrinter := printer{ip: addr.IP.String(), name: strings.TrimRight(string(buf[:128]), "\x00")}
+				// loop through printers to see if newPrinter is already in the list
+				found := false
+				for i := 0; i < len(printers); i++ {
+					if printers[i].ip == newPrinter.ip {
+						found = true
+						break
+					}
+				}
+				if !found {
+					printers = append(printers, newPrinter)
+				}
+			}
+		}
+	}()
+
+	ipBytes := preferredIp.To4()
+	portBytes := make([]byte, 2)
+	binary.BigEndian.PutUint16(portBytes, uint16(18002))
+
+	discoveryPayload := append(ipBytes, append(portBytes, []byte{0x00, 0x00}...)...)
+
+	for {
+		if timeout >= 5 {
+			break
+		}
+
+		udpConn.WriteToUDP(discoveryPayload, &net.UDPAddr{IP: net.IPv4(225, 0, 0, 9), Port: 19000})
+
+		timeout++
+		time.Sleep(1 * time.Second)
+
+		printerList := ""
+		for i := 0; i < len(printers); i++ {
+			printerList = printerList + fmt.Sprintf("%d: %s@%s, ", i, printers[i].name, printers[i].ip)
+		}
+		if printerList != "" {
+			printerList = printerList[:len(printerList)-2]
+		}
+
+		fmt.Printf("\033[2K\rPrinters discovered: %d - %s", len(printers), printerList)
+
+	}
+	fmt.Println()
+	if len(printers) == 0 {
+		return ""
+	}
+	index := 0
+	for {
+		reader := bufio.NewReader(os.Stdin)
+		fmt.Print("Please select desired printer via index: ")
+		text, _ := reader.ReadString('\n')
+		indexStr := strings.TrimSpace(text)
+		indexNum, err := strconv.Atoi(indexStr)
+		if err != nil {
+			fmt.Println("Invalid input.")
+			continue
+		}
+		if indexNum < 0 || indexNum >= len(printers) {
+			fmt.Println("Invalid input.")
+			continue
+		}
+		index = indexNum
+		break
+	}
+
+	return printers[index].ip
 }
 
 func getchunks(data []byte, clength int) [][]byte {
@@ -153,6 +301,19 @@ func getchunks(data []byte, clength int) [][]byte {
 	}
 
 	return sliceofslices
+}
+
+func printUsage() {
+	execName, err := os.Executable()
+	if err != nil {
+		execName = "voxelab-comms"
+	}
+	fmt.Printf("Usage: %s ./path/to/file.gcode {Printer IP}(optional)\n", execName)
+	fmt.Println("Example: voxelab-comms ./test.gcode")
+	fmt.Println("	In this case, the printer will be searched for on the local network.")
+	fmt.Println("Example: voxelab-comms C:/gcode/test.gcode 192.168.0.136")
+	fmt.Println("	In this case, communication will be attempted to 192.168.0.136:8899")
+	os.Exit(1)
 }
 
 func getcrc(dat []byte) []byte { // god
