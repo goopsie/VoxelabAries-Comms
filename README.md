@@ -1,3 +1,3 @@
 # VoxelabAries-Comms
-i think i'm the first person to do this :D
-don't look at my code unless you don't have your glasses on and are 50 feet away
+Sends files to your Voxelab Aries 3D Printer at speeds very similar to Voxelmaker.
+I don't know when you'd use this over Voxelmaker, but it was fun to write :)
